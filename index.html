@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="id"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Firebase Data Lakehouse Medallion Simulator - S1 SI Unipdu</title>
+<style>
+*{box-sizing:border-box;font-family:'Segoe UI',Tahoma,sans-serif}
+body{margin:0;padding:20px;background:#f0f4f8;color:#2d3748}
+.c{max-width:1250px;margin:0 auto 18px;background:#fff;border:1px solid #cbd5e0;border-radius:8px;padding:20px}
+h1{margin:0 0 4px;color:#00bcd4;font-size:23px}h2{margin:0 0 10px;color:#2b6cb0;font-size:17px;border-bottom:2px solid #edf2f7;padding-bottom:6px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:10px}
+.card{border-radius:8px;padding:14px;border:2px solid #cbd5e0}
+.br{background:#fffaf0;border-color:#c05621}.sv{background:#f7fafc;border-color:#4a5568}.gd{background:#fefcbf;border-color:#d69e2e}
+label{display:block;font-weight:bold;font-size:12px;margin-bottom:4px;color:#1a365d}
+input[type=text],select,textarea{width:100%;padding:8px;border:1px solid #cbd5e0;border-radius:6px;font:12px Consolas,monospace}
+textarea{height:130px;resize:vertical}
+button{cursor:pointer;border:0;border-radius:6px;padding:9px 14px;font-weight:bold;font-size:13px;color:#fff;margin:4px 4px 4px 0}
+.b1{background:#c05621}.b2{background:#2b6cb0}.b3{background:#d69e2e;color:#1a202c}.b4{background:#38a169}.b5{background:#e53e3e}.b6{background:#718096}
+#log{background:#1a202c;color:#68d391;padding:12px;border-radius:6px;font:12px Consolas,monospace;height:200px;overflow:auto;white-space:pre-wrap}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}th{background:#2b6cb0;color:#fff;padding:6px;text-align:left}td{padding:5px 6px;border:1px solid #cbd5e0}
+</style></head><body>
+
+<div class="c">
+  <h1>FIREBASE DATA LAKEHOUSE &amp; MEDALLION SIMULATOR (Minggu 9)</h1>
+  <div style="font-size:13px;color:#4a5568">Bronze (Raw Append-Only) &rarr; Silver (ACID, Deduplikasi, Schema Enforcement/Evolution) &rarr; Gold (KPI Marts) &bull; Delta Log &amp; Time Travel &bull; S1 Sistem Informasi Unipdu (4124011)</div>
+  <div style="display:grid;grid-template-columns:2fr 1.5fr 1fr;gap:12px;margin-top:12px;align-items:end">
+    <div><label>Project ID Firebase Anda</label><input type="text" id="pid" value="dwh-unipdu-4124011"></div>
+    <div><label style="font-weight:normal;padding:8px;background:#ebf8ff;border-radius:6px;border:1px solid #90cdf4"><input type="checkbox" id="evo"> Aktifkan <b>Schema Evolution</b> (<code>mergeSchema=true</code>: izinkan <code>channel_penjualan</code>)</label></div>
+    <div><button class="b6" style="width:100%" onclick="refreshStatus()">🔄 Segarkan Status Lakehouse</button></div>
+  </div>
+  <div class="grid3">
+    <div class="card br"><b style="color:#9c4221">1. BRONZE LAYER (Raw Append-Only)</b><div id="stBr" style="font-size:22px;font-weight:bold;margin:4px 0">- dokumen</div><small>Koleksi: <code>lakehouse_bronze_orders</code></small></div>
+    <div class="card sv"><b style="color:#2d3748">2. SILVER LAYER (Cleaned &amp; ACID)</b><div id="stSv" style="font-size:22px;font-weight:bold;margin:4px 0">- dokumen (v0)</div><small>Koleksi: <code>lakehouse_silver_orders</code></small></div>
+    <div class="card gd"><b style="color:#975a16">3. GOLD LAYER (Curated Business KPI)</b><div id="stGd" style="font-size:20px;font-weight:bold;margin:4px 0">- harian | - prov | - prod</div><small>Koleksi: <code>daily_sales</code>, <code>region_kpi</code> &amp; <code>product_kpi</code></small></div>
+  </div>
+</div>
+
+<div class="c">
+  <h2>Panel 1: Bronze Layer Ingestion (Mendukung 4 Dialek NIM via Multi-Adapter)</h2>
+  <div style="margin-bottom:8px">
+    <button class="b1" onclick="syncFromLanding()">📥 Tarik dari landing_zone_raw &rarr; Bronze</button>
+    <button class="b6" onclick="loadSample('dirty')">🧪 Isi Contoh Batch Kotor (Duplikat + Anomali)</button>
+    <button class="b6" onclick="loadSample('evo')">✨ Isi Contoh Batch Schema Evolution</button>
+    <button class="b5" onclick="loadSample('bug')">💥 Isi Contoh Simulasi Insiden Bug Diskon</button>
+  </div>
+  <label>Payload JSON Array untuk Append ke Bronze Layer:</label>
+  <textarea id="jsonIn" placeholder="Klik salah satu tombol contoh di atas atau tempel JSON Paket NIM Anda..."></textarea>
+  <div style="margin-top:6px"><button class="b1" onclick="appendJsonToBronze()">➕ Append JSON ke Bronze Layer (ACID Batch)</button></div>
+</div>
+
+<div class="c">
+  <h2>Panel 2: Multi-Hop Promotion (Bronze &rarr; Silver &rarr; Gold) &amp; Time Travel / Rollback</h2>
+  <div>
+    <button class="b2" onclick="promoteBronzeToSilver()">⚙️ Promosi Bronze &rarr; Silver (ACID + Snapshot + Delta Log)</button>
+    <button class="b3" onclick="buildGoldLayer()">🏆 Bangun Gold Layer (Daily + Region + Product KPI)</button>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid #edf2f7;flex-wrap:wrap">
+    <label style="margin:0">Time Travel (VERSION AS OF):</label>
+    <select id="verSel" style="width:240px"><option value="">-- Belum ada versi Silver --</option></select>
+    <button class="b4" onclick="timeTravelRead()">⏱️ Baca Snapshot Versi Terpilih</button>
+    <button class="b5" onclick="atomicRollback()">⏪ Atomic Rollback Silver &amp; Rebuild Gold ke Versi Ini</button>
+  </div>
+</div>
+
+<div class="c"><h2>Console Log Transaksi Lakehouse</h2><div id="log">[READY] Isi Project ID Firebase Anda lalu klik Segarkan Status Lakehouse.</div></div>
+
+<div class="c">
+  <h2>Inspektor Koleksi &amp; Hasil Time Travel</h2>
+  <div style="display:flex;gap:8px;margin-bottom:8px">
+    <select id="colSel" style="width:320px">
+      <option value="_lakehouse_delta_log">_lakehouse_delta_log (Buku Log Transaksi)</option>
+      <option value="lakehouse_bronze_orders">lakehouse_bronze_orders (Bronze Raw)</option>
+      <option value="lakehouse_silver_orders">lakehouse_silver_orders (Silver Cleaned)</option>
+      <option value="lakehouse_gold_daily_sales">lakehouse_gold_daily_sales (Gold Harian)</option>
+      <option value="lakehouse_gold_region_kpi">lakehouse_gold_region_kpi (Gold Wilayah)</option>
+      <option value="lakehouse_gold_product_kpi">lakehouse_gold_product_kpi (Gold Produk)</option>
+    </select>
+    <button class="b2" onclick="inspectCollection()">🔍 Tampilkan Isi Koleksi</button>
+  </div>
+  <div id="outTbl" style="overflow-x:auto"><i style="font-size:13px;color:#718096">Belum ada data ditampilkan.</i></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id), pid = () => $("pid").value.trim();
+const BASE = p => `https://firestore.googleapis.com/v1/projects/${p}/databases/(default)/documents`;
+const docId = v => String(v).replace(/[\/\s]+/g, "_");
+const rn = (p, c, id) => `projects/${p}/databases/(default)/documents/${c}/${id}`;
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const log = m => { const b = $("log"); b.textContent += `\n[${new Date().toLocaleTimeString()}] ${m}`; b.scrollTop = b.scrollHeight; };
+const toF = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, v == null || Number.isNaN(v) ? {nullValue:null} : typeof v === "boolean" ? {booleanValue:v} : Number.isInteger(v) ? {integerValue:String(v)} : typeof v === "number" ? {doubleValue:v} : {stringValue:String(v)}]));
+const fromF = d => Object.fromEntries(Object.entries(d.fields || {}).map(([k, v]) => [k, "integerValue" in v ? parseInt(v.integerValue, 10) : "doubleValue" in v ? v.doubleValue : "booleanValue" in v ? v.booleanValue : "nullValue" in v ? null : v.stringValue]));
+const upd = (p, c, id, o) => ({ update: { name: rn(p, c, docId(id)), fields: toF(o) } });
+
+async function listAll(coll) {
+  const rows = [], ids = []; let tok = "";
+  do {
+    const res = await fetch(`${BASE(pid())}/${coll}?pageSize=300${tok ? "&pageToken=" + encodeURIComponent(tok) : ""}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} saat membaca ${coll}`);
+    const j = await res.json();
+    (j.documents || []).forEach(d => { rows.push(fromF(d)); ids.push(d.name.split("/").pop()); });
+    tok = j.nextPageToken || "";
+  } while (tok);
+  return { rows, ids };
+}
+async function getOne(coll, id) {
+  const res = await fetch(`${BASE(pid())}/${coll}/${docId(id)}`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`HTTP ${res.status} saat membaca ${coll}/${id}`);
+  return fromF(await res.json());
+}
+async function commit(writes) {
+  if (!writes.length) return;
+  for (let i = 0; i < writes.length; i += 400) {
+    const res = await fetch(`${BASE(pid())}:commit`, { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ writes: writes.slice(i, i + 400) }) });
+    if (!res.ok) throw new Error(`HTTP ${res.status} saat commit: ${(await res.text()).slice(0, 150)}`);
+  }
+}
+
+const pick = (r, ...keys) => { for (const k of keys) if (r[k] !== undefined && r[k] !== null) return r[k]; return null; };
+const PROV_MAP = { jatim:"Jawa Timur", "jawa timur":"Jawa Timur", jateng:"Jawa Tengah", "jawa tengah":"Jawa Tengah", jabar:"Jawa Barat", "jawa barat":"Jawa Barat", dki:"DKI Jakarta", jakarta:"DKI Jakarta", diy:"DI Yogyakarta", yogyakarta:"DI Yogyakarta", bali:"Bali" };
+const normProv = v => { const k = String(v || "").trim().toLowerCase(); return PROV_MAP[k] || (k ? k.replace(/\b\w/g, c => c.toUpperCase()) : "Tidak Diketahui"); };
+const titleCase = s => String(s || "").trim().toLowerCase().replace(/\b\w/g, c => c.toUpperCase());
+
+function renderTable(title, rows) {
+  if (!rows.length) { $("outTbl").innerHTML = `<b>${esc(title)}</b><br><i>Koleksi/snapshot kosong.</i>`; return; }
+  const cols = [...new Set(rows.flatMap(r => Object.keys(r)))];
+  $("outTbl").innerHTML = `<div style="font-weight:bold;color:#1a365d;margin-bottom:4px">${esc(title)} (${rows.length} baris)</div><table><tr>${cols.map(c => `<th>${esc(c)}</th>`).join("")}</tr>${rows.map(r => `<tr>${cols.map(c => `<td>${esc(r[c])}</td>`).join("")}</tr>`).join("")}</table>`;
+}
+
+async function getNextVersion() {
+  const { rows } = await listAll("_lakehouse_delta_log");
+  return rows.reduce((mx, r) => Math.max(mx, Number(r.version) || 0), 0) + 1;
+}
+
+async function refreshStatus() {
+  try {
+    const [br, sv, gdD, gdR, gdP, lg] = await Promise.all([
+      listAll("lakehouse_bronze_orders"), listAll("lakehouse_silver_orders"),
+      listAll("lakehouse_gold_daily_sales"), listAll("lakehouse_gold_region_kpi"),
+      listAll("lakehouse_gold_product_kpi"), listAll("_lakehouse_delta_log")
+    ]);
+    const silverLogs = lg.rows.filter(r => r.has_snapshot).sort((a, b) => b.version - a.version);
+    const curVer = silverLogs.length ? silverLogs[0].version : 0;
+    $("stBr").textContent = `${br.rows.length} dokumen`;
+    $("stSv").textContent = `${sv.rows.length} dokumen (v${curVer})`;
+    $("stGd").textContent = `${gdD.rows.length} harian | ${gdR.rows.length} prov | ${gdP.rows.length} prod`;
+    $("verSel").innerHTML = silverLogs.length
+      ? silverLogs.map(v => `<option value="${v.version}">v${String(v.version).padStart(4,"0")} - ${v.operation} (${v.row_count} baris)</option>`).join("")
+      : `<option value="">-- Belum ada versi Silver --</option>`;
+    log(`Status disegarkan: Bronze=${br.rows.length}, Silver=${sv.rows.length} (v${curVer}), Gold=${gdD.rows.length}/${gdR.rows.length}/${gdP.rows.length}, DeltaLog=${lg.rows.length}.`);
+  } catch (e) { log("ERROR: " + e.message); }
+}
+
+function loadSample(type) {
+  if (type === "dirty") $("jsonIn").value = JSON.stringify([
+    { no_nota:"ORD-LK-01", tgl_nota:"2026-10-15", kode_barang:"PRD-001", kode_member:"CUST-01", nama_pembeli:"budi SANTOSO", kota:"jombang", propinsi:"jatim", qty:2, harga_barang:8500000, potongan:"10%" },
+    { no_nota:"ORD-LK-01", tgl_nota:"2026-10-15", kode_barang:"PRD-001", kode_member:"CUST-01", nama_pembeli:"budi SANTOSO", kota:"jombang", propinsi:"jatim", qty:2, harga_barang:8500000, potongan:"10%" },
+    { order_id:"ORD-LK-02", order_date:"2026-10-16", product_sku:"PRD-003", buyer_id:"CUST-02", buyer_name:"siti AMINAH", city:"semarang", province:"jateng", quantity:-1, unit_price:1650000, discount_rate:"5%" },
+    { trx_code:"ORD-BAD-01", trx_date:"2026-10-16", item_id:"PRD-002", user_id:"CUST-99", full_name:"anomali harga", domisili_kota:"bandung", domisili_prov:"jabar", jml_beli:3, hrg_satuan:0, disc:"0%" }
+  ], null, 2);
+  if (type === "evo") $("jsonIn").value = JSON.stringify([
+    { id_pesanan_nk:"ORD-LK-03", tanggal_penjualan:"2026-10-18", id_produk_nk:"PRD-005", id_pelanggan_nk:"CUST-03", nama_pelanggan:"dewi LESTARI", nama_kota:"surabaya", nama_provinsi:"jatim", jumlah:3, harga_satuan:950000, diskon_persen:"15%", channel_penjualan:"TikTok Shop Live" }
+  ], null, 2);
+  if (type === "bug") $("jsonIn").value = JSON.stringify([
+    { id_pesanan_nk:"ORD-LK-01", tanggal_penjualan:"2026-10-15", id_produk_nk:"PRD-001", id_pelanggan_nk:"CUST-01", nama_pelanggan:"budi SANTOSO", nama_kota:"jombang", nama_provinsi:"jatim", jumlah:2, harga_satuan:8500000, diskon_persen:"150%" }
+  ], null, 2);
+}
+
+async function appendRecordsToBronze(records, sourceName) {
+  const P = pid(), batchId = "BATCH_" + Date.now(), ts = new Date().toISOString();
+  const writes = records.map((r, i) => upd(P, "lakehouse_bronze_orders", `${batchId}_${i}`, { ...r, _batch_id: batchId, _source_system: sourceName, _ingested_at: ts }));
+  await commit(writes);
+  log(`BRONZE APPEND OK: ${records.length} dokumen masuk ke lakehouse_bronze_orders (Batch: ${batchId}, Sumber: ${sourceName}).`);
+  await refreshStatus();
+}
+
+async function syncFromLanding() {
+  try {
+    const { rows } = await listAll("landing_zone_raw");
+    if (!rows.length) throw new Error("landing_zone_raw kosong!");
+    await appendRecordsToBronze(rows, "landing_zone_raw_M5");
+  } catch (e) { log("ERROR Bronze Sync: " + e.message); }
+}
+
+async function appendJsonToBronze() {
+  try {
+    const parsed = JSON.parse($("jsonIn").value);
+    const arr = Array.isArray(parsed) ? parsed : [parsed];
+    await appendRecordsToBronze(arr, "manual_json_batch");
+  } catch (e) { log("ERROR JSON Bronze: " + e.message); }
+}
+
+async function promoteBronzeToSilver() {
+  try {
+    const allowEvo = $("evo").checked, P = pid();
+    const [br, oldSv] = await Promise.all([listAll("lakehouse_bronze_orders"), listAll("lakehouse_silver_orders")]);
+    if (!br.rows.length) throw new Error("Bronze Layer kosong! Lakukan ingestion terlebih dahulu.");
+    const sorted = [...br.rows].sort((a, b) => String(a._ingested_at || "").localeCompare(String(b._ingested_at || "")));
+    const dedup = new Map(); let rejected = 0;
+    const nextVer = await getNextVersion();
+
+    for (const r of sorted) {
+      const id = String(pick(r, "id_pesanan_nk", "no_nota", "order_id", "trx_code") || "").trim();
+      const tgl = String(pick(r, "tanggal_penjualan", "tgl_nota", "order_date", "trx_date") || "").trim().slice(0, 10);
+      const prd = pick(r, "id_produk_nk", "kode_barang", "product_sku", "item_id");
+      const harga = Number(pick(r, "harga_satuan", "harga_barang", "unit_price", "hrg_satuan")) || 0;
+      const qtyRaw = parseInt(pick(r, "jumlah", "qty", "quantity", "jml_beli"), 10) || 0;
+      const qty = Math.abs(qtyRaw);
+      const discPct = parseFloat(String(pick(r, "diskon_persen", "potongan", "discount_rate", "disc") || "0").replace("%", "")) || 0;
+      if (!id || !tgl || harga <= 0 || qty <= 0 || discPct > 100 || discPct < 0) { rejected++; continue; }
+      const bruto = qty * harga, diskon = Math.round(bruto * (discPct / 100));
+      const clean = {
+        id_pesanan_nk: id, tanggal_penjualan: tgl, id_produk_nk: prd || "UNKNOWN",
+        nama_pelanggan: titleCase(pick(r, "nama_pelanggan", "nama_pembeli", "buyer_name", "full_name")),
+        nama_kota: titleCase(pick(r, "nama_kota", "kota", "city", "domisili_kota")),
+        nama_provinsi: normProv(pick(r, "nama_provinsi", "propinsi", "province", "domisili_prov")),
+        jumlah: qty, harga_satuan: harga, diskon_persen: discPct, total_bruto: bruto, total_neto: bruto - diskon,
+        _batch_id: r._batch_id || "-", _delta_version: nextVer
+      };
+      if (allowEvo && r.channel_penjualan) clean.channel_penjualan = String(r.channel_penjualan);
+      dedup.set(id, clean);
+    }
+
+    const cleanRows = [...dedup.values()];
+    const keepIds = new Set(cleanRows.map(x => docId(x.id_pesanan_nk)));
+    const writes = cleanRows.map(x => upd(P, "lakehouse_silver_orders", x.id_pesanan_nk, x));
+    oldSv.ids.filter(i => !keepIds.has(i)).forEach(i => writes.push({ delete: rn(P, "lakehouse_silver_orders", i) }));
+    writes.push(upd(P, "_lakehouse_snapshots", `silver_v${nextVer}`, { version: nextVer, rows_json: JSON.stringify(cleanRows), created_at: new Date().toISOString() }));
+    writes.push(upd(P, "_lakehouse_delta_log", `v${String(nextVer).padStart(4,"0")}`, {
+      version: nextVer, layer: "silver", operation: allowEvo ? "MERGE_SCHEMA_EVOLUTION" : "MERGE_ENFORCED",
+      bronze_scanned: br.rows.length, rejected_anomali: rejected, row_count: cleanRows.length, has_snapshot: true, committed_at: new Date().toISOString()
+    }));
+    await commit(writes);
+    log(`SILVER ACID COMMIT v${nextVer} OK: Bronze=${br.rows.length}, Ditolak Schema Enforcement=${rejected}, Tersimpan Unik=${cleanRows.length} (Evolution=${allowEvo}).`);
+    await refreshStatus();
+    renderTable(`Silver Layer (Versi v${nextVer})`, cleanRows);
+  } catch (e) { log("ERROR Silver: " + e.message); }
+}
+
+async function buildGoldLayer(logPrefix = "GOLD_AGGREGATION") {
+  try {
+    const P = pid();
+    const [sv, oldD, oldR, oldP] = await Promise.all([
+      listAll("lakehouse_silver_orders"), listAll("lakehouse_gold_daily_sales"),
+      listAll("lakehouse_gold_region_kpi"), listAll("lakehouse_gold_product_kpi")
+    ]);
+    if (!sv.rows.length) throw new Error("Silver Layer kosong! Promosikan Bronze ke Silver terlebih dahulu.");
+    const daily = {}, reg = {}, prod = {};
+    for (const r of sv.rows) {
+      daily[r.tanggal_penjualan] ??= { tanggal: r.tanggal_penjualan, omset_harian: 0, total_transaksi: 0, total_unit: 0 };
+      daily[r.tanggal_penjualan].omset_harian += Number(r.total_neto) || 0;
+      daily[r.tanggal_penjualan].total_transaksi += 1;
+      daily[r.tanggal_penjualan].total_unit += Number(r.jumlah) || 0;
+
+      reg[r.nama_provinsi] ??= { nama_provinsi: r.nama_provinsi, omset_provinsi: 0, total_transaksi: 0 };
+      reg[r.nama_provinsi].omset_provinsi += Number(r.total_neto) || 0;
+      reg[r.nama_provinsi].total_transaksi += 1;
+
+      const pKey = r.id_produk_nk || "UNKNOWN";
+      prod[pKey] ??= { id_produk_nk: pKey, omset_produk: 0, total_unit_terjual: 0, total_transaksi: 0 };
+      prod[pKey].omset_produk += Number(r.total_neto) || 0;
+      prod[pKey].total_unit_terjual += Number(r.jumlah) || 0;
+      prod[pKey].total_transaksi += 1;
+    }
+    const dRows = Object.values(daily).sort((a, b) => a.tanggal.localeCompare(b.tanggal));
+    const rRows = Object.values(reg).map(x => ({ ...x, rata_rata_order: Math.round(x.omset_provinsi / x.total_transaksi) })).sort((a, b) => b.omset_provinsi - a.omset_provinsi);
+    const pRows = Object.values(prod).sort((a, b) => b.omset_produk - a.omset_produk);
+
+    const nextVer = await getNextVersion(), writes = [];
+    const keepD = new Set(dRows.map(x => docId(x.tanggal)));
+    const keepR = new Set(rRows.map(x => docId(x.nama_provinsi)));
+    const keepP = new Set(pRows.map(x => docId(x.id_produk_nk)));
+
+    dRows.forEach(x => writes.push(upd(P, "lakehouse_gold_daily_sales", x.tanggal, x)));
+    oldD.ids.filter(i => !keepD.has(i)).forEach(i => writes.push({ delete: rn(P, "lakehouse_gold_daily_sales", i) }));
+
+    rRows.forEach(x => writes.push(upd(P, "lakehouse_gold_region_kpi", x.nama_provinsi, x)));
+    oldR.ids.filter(i => !keepR.has(i)).forEach(i => writes.push({ delete: rn(P, "lakehouse_gold_region_kpi", i) }));
+
+    pRows.forEach(x => writes.push(upd(P, "lakehouse_gold_product_kpi", x.id_produk_nk, x)));
+    oldP.ids.filter(i => !keepP.has(i)).forEach(i => writes.push({ delete: rn(P, "lakehouse_gold_product_kpi", i) }));
+
+    writes.push(upd(P, "_lakehouse_delta_log", `v${String(nextVer).padStart(4,"0")}`, {
+      version: nextVer, layer: "gold", operation: logPrefix, row_count: dRows.length + rRows.length + pRows.length, has_snapshot: false, committed_at: new Date().toISOString()
+    }));
+    await commit(writes);
+    log(`GOLD LAYER OK (v${nextVer}): ${dRows.length} Harian, ${rRows.length} Provinsi, & ${pRows.length} Produk berhasil dibangun.`);
+    await refreshStatus();
+    renderTable("Gold Layer: lakehouse_gold_product_kpi", pRows);
+  } catch (e) { log("ERROR Gold: " + e.message); }
+}
+
+async function timeTravelRead() {
+  try {
+    const v = $("verSel").value; if (!v) throw new Error("Pilih versi Silver terlebih dahulu!");
+    const snap = await getOne("_lakehouse_snapshots", `silver_v${v}`);
+    if (!snap) throw new Error(`Snapshot silver_v${v} tidak ditemukan!`);
+    const rows = JSON.parse(snap.rows_json);
+    log(`TIME TRAVEL READ OK: Membaca kondisi Silver persis pada VERSION AS OF ${v} (${rows.length} baris, dibuat ${snap.created_at}).`);
+    renderTable(`TIME TRAVEL: lakehouse_silver_orders VERSION AS OF ${v}`, rows);
+  } catch (e) { log("ERROR Time Travel: " + e.message); }
+}
+
+async function atomicRollback() {
+  try {
+    const v = $("verSel").value; if (!v) throw new Error("Pilih versi target rollback terlebih dahulu!");
+    const P = pid(), snap = await getOne("_lakehouse_snapshots", `silver_v${v}`);
+    if (!snap) throw new Error(`Snapshot silver_v${v} tidak ditemukan!`);
+    const rows = JSON.parse(snap.rows_json), oldSv = await listAll("lakehouse_silver_orders"), nextVer = await getNextVersion();
+    const keepIds = new Set(rows.map(x => docId(x.id_pesanan_nk)));
+    const writes = rows.map(x => upd(P, "lakehouse_silver_orders", x.id_pesanan_nk, { ...x, _delta_version: nextVer, _restored_from: Number(v) }));
+    oldSv.ids.filter(i => !keepIds.has(i)).forEach(i => writes.push({ delete: rn(P, "lakehouse_silver_orders", i) }));
+    writes.push(upd(P, "_lakehouse_snapshots", `silver_v${nextVer}`, { version: nextVer, rows_json: JSON.stringify(rows), created_at: new Date().toISOString() }));
+    writes.push(upd(P, "_lakehouse_delta_log", `v${String(nextVer).padStart(4,"0")}`, {
+      version: nextVer, layer: "silver", operation: `RESTORE_TO_v${v}`, row_count: rows.length, has_snapshot: true, committed_at: new Date().toISOString()
+    }));
+    await commit(writes);
+    log(`ATOMIC ROLLBACK OK: Silver dipulihkan ke kondisi v${v} (tercatat sebagai versi baru v${nextVer}). Membangun ulang Gold Layer...`);
+    await buildGoldLayer(`CASCADE_GOLD_REBUILD_FROM_v${v}`);
+  } catch (e) { log("ERROR Rollback: " + e.message); }
+}
+
+async function inspectCollection() {
+  try {
+    const c = $("colSel").value, { rows } = await listAll(c);
+    if (c === "_lakehouse_delta_log") rows.sort((a, b) => (a.version || 0) - (b.version || 0));
+    renderTable(`Inspektor Firestore: ${c}`, rows);
+  } catch (e) { log("ERROR Inspektor: " + e.message); }
+}
+</script></body></html>
